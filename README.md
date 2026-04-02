@@ -1,168 +1,212 @@
 # 📰 AI News Credibility Checker
 
-An **AI-powered web application** that evaluates the credibility of news articles using **Natural Language Processing (NLP)** and **Explainable AI**.  
-The system not only predicts whether news is *Real or Fake*, but also **explains why** the prediction was made.
+![Python](https://img.shields.io/badge/Python-3.10+-blue?style=flat-square&logo=python)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.35+-red?style=flat-square&logo=streamlit)
+![DistilBERT](https://img.shields.io/badge/DistilBERT-HuggingFace-yellow?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+
+A Second year project that uses **DistilBERT embeddings**, **stylistic signal analysis**, and **Explainable AI (LIME)** to detect fake news articles. Paste text or provide a URL — the system returns a credibility score with a full breakdown of why it made that decision.
+
+> ⚠️ This tool assists credibility assessment and does not replace human fact-checking.
 
 ---
 
-## 🚀 Features
+## 📸 Demo
 
-- ✅ Fake vs Real News Classification  
-- 📊 Probability-based Credibility Score  
-- 📈 Real vs Fake Percentage Breakdown  
-- 🧠 Explainable AI using **LIME** (highlights influential words)  
-- 🌐 Interactive Web App built with **Streamlit**  
-- ♻️ Reproducible Machine Learning pipeline  
-- 🧪 Model evaluated using standard ML metrics  
+> _Add a screenshot of the app here after running it_
+> `screenshots/demo.png`
+
+---
+
+## ✨ Features
+
+- **DistilBERT + Stylistic features** — combines transformer embeddings (768 dims) with 10 hand-crafted fake-news signals for superior accuracy
+- **Stylistic signal breakdown** — visual bars showing ALL CAPS ratio, exclamation marks, source citations, alarm words, and more
+- **LIME explainability** — highlights which words pushed the model towards Real or Fake
+- **URL scraping** — paste any news article URL and the app extracts the text automatically
+- **Model metrics dashboard** — accuracy, precision, recall, F1, ROC-AUC, and confusion matrix
+- **WELFake + ISOT training** — trained on 70,000+ articles for robust generalisation
+- **Dark editorial UI** — clean Streamlit interface with Playfair Display typography
 
 ---
 
 ## 🧠 How It Works
 
-1. User pastes a news article into the web app  
-2. Text is cleaned and preprocessed  
-3. Features are extracted using **TF-IDF Vectorization**  
-4. A **Logistic Regression** model predicts credibility  
-5. Output includes:
-   - Credibility Score (%)
-   - Real vs Fake probabilities  
-6. **LIME** explains which words influenced the decision  
+```
+Article Text / URL
+       │
+       ▼
+┌─────────────────────────────┐
+│  DistilBERT CLS Embeddings  │  (768 dimensions)
+│  +                          │
+│  Stylistic Features (×10)   │  ALL CAPS, exclamations, sources...
+└─────────────────────────────┘
+       │
+       ▼
+  Logistic Regression Classifier
+       │
+       ▼
+  Credibility Score + LIME Explanation
+```
 
-⚠️ This tool provides **AI-assisted credibility analysis** and does not replace human fact-checking.
+### Stylistic features extracted:
+| Feature | Fake signal? |
+|---|---|
+| ALL CAPS word ratio | High = suspicious |
+| Exclamation mark ratio | High = sensationalist |
+| Alarm words (BREAKING, deep state...) | High = suspicious |
+| Source citation score (according to...) | High = credible |
+| Article length | Short = suspicious |
+| Numeric facts ratio | High = credible |
+| Quoted phrases | High = credible |
+
+---
+
+## 📁 Project Structure
+
+```
+news-credibility-checker/
+│
+├── app.py                  # Streamlit web application
+├── train_model.py          # Model training pipeline
+├── requirements.txt        # Dependencies
+├── README.md
+│
+├── data/                   # (not committed — see setup below)
+│   ├── Fake.csv
+│   ├── True.csv
+│   └── WELFake_Dataset.csv
+│
+└── model/                  # (generated after training)
+    ├── model.pkl
+    ├── scaler.pkl
+    ├── bert_model_name.pkl
+    └── metrics.json
+```
+
+---
+
+## ⚙️ Installation
+
+### 1. Clone the repository
+```bash
+git clone https://github.com/chuyong-1/news-credibility-checker.git
+cd news-credibility-checker
+```
+
+### 2. Create and activate virtual environment
+```bash
+python -m venv venv
+```
+
+**Windows PowerShell:**
+```bash
+.\venv\Scripts\Activate.ps1
+```
+
+**Mac / Linux:**
+```bash
+source venv/bin/activate
+```
+
+### 3. Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 📦 Dataset Setup
+
+This project uses two datasets. Download and place them in the `data/` folder.
+
+**ISOT Fake News Dataset**
+- Download: [Kaggle — ISOT Fake News Dataset](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)
+- Place as: `data/Fake.csv` and `data/True.csv`
+
+**WELFake Dataset** (recommended — 72,000 articles)
+- Download: [Kaggle — WELFake](https://www.kaggle.com/datasets/saurabhshahane/fake-news-classification)
+- Place as: `data/WELFake_Dataset.csv`
+
+---
+
+## 🏋️ Training the Model
+
+```bash
+python train_model.py
+```
+
+This will:
+1. Load and merge ISOT + WELFake datasets
+2. Extract DistilBERT CLS embeddings for all articles
+3. Extract 10 stylistic features per article
+4. Train a Logistic Regression classifier on the combined features
+5. Save `model/model.pkl`, `model/scaler.pkl`, and `model/metrics.json`
+
+Training time: ~20–40 minutes on CPU depending on dataset size.
+
+To use TF-IDF instead of BERT (faster, less accurate), set `USE_BERT = False` in `train_model.py`.
+
+---
+
+## 🚀 Running the App
+
+```bash
+streamlit run app.py
+```
+
+Opens at `http://localhost:8501`
+
+---
+
+## 📊 Model Performance
+
+Results on 20% held-out test set after training on WELFake + ISOT:
+
+| Metric | Score |
+|---|---|
+| Accuracy | ~97–98% |
+| Precision | ~97% |
+| Recall | ~98% |
+| F1 Score | ~97% |
+| ROC-AUC | ~99% |
+
+> Exact scores are saved to `model/metrics.json` after training and displayed live in the app's Metrics tab.
 
 ---
 
 ## 🛠️ Tech Stack
 
-- Python  
-- Scikit-learn  
-- Pandas  
-- NumPy  
-- NLTK  
-- Streamlit  
-- LIME (Explainable AI)  
-- Joblib  
-- Git & GitHub  
+| Component | Technology |
+|---|---|
+| Web framework | Streamlit |
+| NLP embeddings | DistilBERT (HuggingFace Transformers) |
+| Classifier | Scikit-learn Logistic Regression |
+| Explainability | LIME |
+| URL scraping | newspaper3k |
+| Data processing | Pandas, NumPy, NLTK |
 
 ---
 
-## 📂 Project Structure
-news-credibility-checker/
-│
-├── app.py # Streamlit web application
-├── train_model.py # Model training & evaluation
-├── requirements.txt # Dependencies
-├── README.md # Documentation
-├── .gitignore
-│
-├── data/ # Dataset files
-├── model/ # Saved models (ignored in git)
-├── screenshots/ # App screenshots
+## 🗺️ Roadmap
 
+- [ ] Domain reputation blacklist check
+- [ ] Separate headline/short-text classifier
+- [ ] Wikipedia entity verification
+- [ ] Analysis history (SQLite)
+- [ ] PDF report export
+- [ ] Model comparison dashboard (TF-IDF vs BERT vs BERT+Style)
 
 ---
 
-## 📊 Model Evaluation
+## 👤 Author
 
-The model is trained using a **train-test split** and evaluated using:
-
-- Accuracy  
-- Precision  
-- Recall  
-- F1-score  
-
-This ensures the model generalizes well to unseen news articles.
+**Kwok Wai Taifa**
+Second Year Project — Machine Learning
+GitHub: [@chuyong-1](https://github.com/chuyong-1)
 
 ---
 
-## 🧠 Explainable AI (Why This Matters)
-
-Instead of acting as a black box, the model explains predictions using **LIME**.
-
-Examples:
-- 🟢 *official*, *confirmed*, *report* → pushes towards **Real**
-- 🔴 *shocking*, *you won’t believe*, *secret* → pushes towards **Fake**
-
-This improves **transparency, trust, and usability**.
-
----
-
-## 🖥️ How to Run Locally
-
-### 1️⃣ Clone the repository
-```bash
-git clone https://github.com/chuyong-1/news-credibility-checker.git
-cd news-credibility-checker
-python -m venv venv
-venv\Scripts\activate
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-```
-## 📸 Screenshots
-
-### ✅ Real News Prediction
-![Real News Example](screenshots/real_news_example.png)
-
-### 🧠 Explainable AI – Real News
-![Real News Explainability](screenshots/r_explainability_view.png)
-
----
-
-### ❌ Fake News Prediction
-![Fake News Example](screenshots/fake_news_example.png)
-
-### 🧠 Explainable AI – Fake News
-![Fake News Explainability](screenshots/f_explainability_view.png)
-
-⚠️ Limitations
-
-Text-only analysis (no images or videos)
-
-Dataset bias may affect predictions
-
-No real-time fact-checking against live sources
-
-Predictions should be used as supporting signals only
-
-🌱 Future Improvements
-
-Transformer-based models (BERT / DistilBERT)
-
-Source credibility scoring using URLs
-
-Chrome browser extension
-
-Multilingual support
-
-Blockchain-backed credibility verification
-
-👨‍💻 Author
-
-Chuyong
-Computer Science (AI & ML)
-Interested in AI, Machine Learning, and trustworthy information systems
-
-📄 License
+## 📄 License
 
 This project is licensed under the MIT License.
-
-⭐ Support
-
-If you find this project useful, feel free to ⭐ star the repository.
-Feedback and suggestions are welcome!
-
-
----
-
-## ✅ FINAL STEP (VERY IMPORTANT)
-
-After pasting and saving:
-
-```bash
-git add README.md
-git commit -m "Finalize README with proper formatting and screenshots"
-git push origin main
-
-
-Then refresh GitHub (Ctrl + Shift + R).
