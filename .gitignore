@@ -1,16 +1,32 @@
+# Environment
+.env
+*.env
+
 # Python
 __pycache__/
-*.pyc
-
-# Virtual environment
+*.py[cod]
+*.pyo
+.Python
 venv/
-.env/
+env/
+.venv/
 
-# Model files
-model/*.pkl
+# Model artifacts (large files)
+model/model.pkl
+model/vectorizer.pkl
+model/bert_model_name.pkl
 
-# Streamlit
-.streamlit/
+# Data (usually large CSVs)
+data/
 
-# OS files
+# Logs
+logs/
+*.log
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
