@@ -8,6 +8,7 @@ import streamlit as st
 
 nltk.download("stopwords", quiet=True)
 from nltk.corpus import stopwords
+from entity_checker import check_entities, EntityCheckReport
 
 # --------------------------------------------------
 # Page config
@@ -215,6 +216,17 @@ def load_model():
     return model, scaler, vectorizer, bert_tokenizer, bert_model_obj, feature_type
 
 
+@st.cache_resource(show_spinner=False)
+def load_spacy():
+    try:
+        import spacy
+        return spacy.load("en_core_web_sm")
+    except OSError:
+        return None
+    except ImportError:
+        return None
+
+
 @st.cache_data(show_spinner=False)
 def load_metrics():
     if os.path.exists("model/metrics.json"):
@@ -280,6 +292,7 @@ with st.sidebar:
     st.markdown("---")
     num_features = st.slider("LIME features to show", 5, 20, 10)
     show_style   = st.toggle("Show stylistic breakdown", value=True)
+    show_entity  = st.toggle("Wikipedia entity check", value=True)
     st.markdown("---")
     st.caption("⚠️ Does not replace human fact-checking.")
 
@@ -295,6 +308,7 @@ st.markdown(
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 model, scaler, vectorizer, bert_tokenizer, bert_model_obj, feature_type = load_model()
+nlp = load_spacy()
 
 from lime.lime_text import LimeTextExplainer
 explainer = LimeTextExplainer(class_names=["Real", "Fake"])
@@ -389,24 +403,40 @@ if news_to_analyse:
         )
         credibility = round(real_prob, 2)
 
-    # Verdict
-    if credibility >= 70:
-        st.markdown(f'<div class="verdict-real">✅ Likely Real — {credibility}% credibility</div>', unsafe_allow_html=True)
-    elif credibility >= 40:
-        st.markdown(f'<div class="verdict-uncertain">⚠️ Uncertain — {credibility}% credibility</div>', unsafe_allow_html=True)
-    else:
-        st.markdown(f'<div class="verdict-fake">❌ Likely Fake — {credibility}% credibility</div>', unsafe_allow_html=True)
+    # Entity check
+    entity_report = None
+    if show_entity and nlp is not None:
+        with st.spinner("Checking named entities on Wikipedia..."):
+            entity_report = check_entities(news_to_analyse, nlp)
 
+    # Blended final score: 70% ML + 30% entity if available
+    if entity_report and not entity_report.error and entity_report.total_checked > 0:
+        final_score = round(0.70 * credibility + 0.30 * entity_report.entity_score, 1)
+        score_note  = "ML + Wikipedia entity (blended)"
+    else:
+        final_score = credibility
+        score_note  = "ML model only"
+
+    # Verdict
+    if final_score >= 70:
+        st.markdown(f'<div class="verdict-real">✅ Likely Real — {final_score}% credibility</div>', unsafe_allow_html=True)
+    elif final_score >= 40:
+        st.markdown(f'<div class="verdict-uncertain">⚠️ Uncertain — {final_score}% credibility</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="verdict-fake">❌ Likely Fake — {final_score}% credibility</div>', unsafe_allow_html=True)
+
+    st.caption(f"Source: {score_note}")
     st.markdown("")
 
     # Metric cards
-    c1, c2, c3 = st.columns(3)
-    c1.markdown(f'<div class="metric-card"><div class="label">Credibility Score</div><div class="value">{credibility}%</div></div>', unsafe_allow_html=True)
-    c2.markdown(f'<div class="metric-card"><div class="label">Real Probability</div><div class="value" style="color:#5dba85">{real_prob:.1f}%</div></div>', unsafe_allow_html=True)
-    c3.markdown(f'<div class="metric-card"><div class="label">Fake Probability</div><div class="value" style="color:#e06060">{fake_prob:.1f}%</div></div>', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(f'<div class="metric-card"><div class="label">Final Score</div><div class="value">{final_score}%</div></div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="metric-card"><div class="label">ML Score</div><div class="value" style="color:#c9a84c">{credibility}%</div></div>', unsafe_allow_html=True)
+    c3.markdown(f'<div class="metric-card"><div class="label">Real Probability</div><div class="value" style="color:#5dba85">{real_prob:.1f}%</div></div>', unsafe_allow_html=True)
+    c4.markdown(f'<div class="metric-card"><div class="label">Fake Probability</div><div class="value" style="color:#e06060">{fake_prob:.1f}%</div></div>', unsafe_allow_html=True)
 
     st.markdown("")
-    st.progress(credibility / 100)
+    st.progress(final_score / 100)
 
     # --------------------------------------------------
     # Stylistic breakdown
@@ -483,6 +513,46 @@ if news_to_analyse:
 
     st.markdown("")
     st.caption("LIME perturbs the input to estimate each word's contribution to the verdict.")
+
+    # --------------------------------------------------
+    # Wikipedia entity results
+    # --------------------------------------------------
+    if entity_report:
+        st.markdown("")
+        ent_icon = "✅" if not entity_report.error and entity_report.not_found_count == 0 else "⚠️"
+        with st.expander(f"{ent_icon} Wikipedia Entity Check — {entity_report.summary}", expanded=entity_report.not_found_count > 0):
+            if entity_report.error:
+                st.warning(f"Entity check unavailable: {entity_report.error}")
+                st.code("pip install spacy\npython -m spacy download en_core_web_sm")
+            elif entity_report.total_checked == 0:
+                st.info("No named entities found in this article.")
+            else:
+                ec1, ec2, ec3 = st.columns(3)
+                ec1.markdown(f'<div class="metric-card"><div class="label">Entity score</div><div class="value">{entity_report.entity_score}</div></div>', unsafe_allow_html=True)
+                ec2.markdown(f'<div class="metric-card"><div class="label">Verified</div><div class="value" style="color:#5dba85">{entity_report.verified_count}</div></div>', unsafe_allow_html=True)
+                ec3.markdown(f'<div class="metric-card"><div class="label">Not found</div><div class="value" style="color:#e06060">{entity_report.not_found_count}</div></div>', unsafe_allow_html=True)
+                st.markdown("")
+
+                for ent in entity_report.entities:
+                    if ent.status == "verified":
+                        icon, css = "✓", "word-real"
+                    elif ent.status == "not_found":
+                        icon, css = "✗", "word-fake"
+                    else:
+                        icon, css = "?", "word-neutral"
+
+                    impact_str = f"+{ent.score_impact:.0f}" if ent.score_impact >= 0 else f"{ent.score_impact:.0f}"
+                    tag = f'<span class="word-tag {css}">{icon} {ent.name} <small>({ent.entity_type}) {impact_str}</small></span>'
+                    st.markdown(tag, unsafe_allow_html=True)
+
+                    if ent.summary and ent.status == "verified":
+                        st.caption(f"  ↳ {ent.summary[:120]}{'...' if len(ent.summary or '') > 120 else ''}")
+                    elif ent.status == "not_found":
+                        st.caption(f"  ↳ '{ent.name}' not found on Wikipedia — potential fabrication")
+
+                st.caption("Entity scores: verified +8, not found −15, ambiguous −3. Contributes 30% to final score.")
+    elif show_entity and nlp is None:
+        st.info("Install spaCy to enable entity checking: `pip install spacy && python -m spacy download en_core_web_sm`")
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
     st.caption(f"Article: {word_count} words · Features: {feature_type.upper()}")
