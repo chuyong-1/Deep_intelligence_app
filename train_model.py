@@ -158,21 +158,14 @@ if USE_BERT:
             print(f"   VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
         else:
             print("   ⚠️  No GPU detected — running on CPU (slow).")
-            print("      Verify with: python -c \"import torch; print(torch.cuda.is_available())\"")
 
         def get_bert_embeddings(texts: list, label: str) -> np.ndarray:
-            """
-            Extract CLS embeddings with checkpoint/resume support.
-            Saves a checkpoint every 100 batches so a crash never
-            forces you to restart from scratch.
-            """
             chk_emb = os.path.join(CHECKPOINT_DIR, f"emb_{label}.npy")
             chk_idx = os.path.join(CHECKPOINT_DIR, f"emb_{label}_idx.json")
 
             all_emb = []
             start_i = 0
 
-            # --- resume from checkpoint if available ---
             if os.path.exists(chk_emb) and os.path.exists(chk_idx):
                 try:
                     saved   = np.load(chk_emb, allow_pickle=True)
@@ -209,11 +202,9 @@ if USE_BERT:
                 with torch.no_grad():
                     out = bert_model(**enc)
 
-                # move to CPU immediately to free GPU VRAM
                 emb = out.last_hidden_state[:, 0, :].cpu().numpy()
                 all_emb.append(emb)
 
-                # plain-text progress when tqdm not available
                 if not _tqdm and step % 50 == 0:
                     done    = i + len(batch)
                     elapsed = time.time() - t0
@@ -222,7 +213,6 @@ if USE_BERT:
                     print(f"   [{label}] {done:,}/{total:,}  "
                           f"~{remain/60:.1f} min remaining", end="\r")
 
-                # --- save checkpoint every 100 batches ---
                 if (step + 1) % 100 == 0:
                     np.save(chk_emb, np.array(all_emb, dtype=object))
                     with open(chk_idx, "w") as f:
@@ -232,7 +222,6 @@ if USE_BERT:
             if not _tqdm:
                 print()
 
-            # final checkpoint
             np.save(chk_emb, np.array(all_emb, dtype=object))
             with open(chk_idx, "w") as f:
                 json.dump({"next_index": total}, f)
@@ -271,7 +260,7 @@ if not USE_BERT:
     print(f"   Feature matrix: {X_train.shape}")
 
 # --------------------------------------------------
-# Cross-validation  (on train set only)
+# Cross-validation
 # --------------------------------------------------
 print(f"\n🔄 {CV_FOLDS}-fold cross-validation on training set...")
 base_clf = LogisticRegression(max_iter=2000, C=1.0, random_state=RANDOM_STATE, n_jobs=-1)
@@ -281,7 +270,7 @@ cv_scores = cross_val_score(base_clf, X_train, y_train, cv=cv, scoring="f1", n_j
 print(f"   CV F1: {cv_scores.mean()*100:.2f}% ± {cv_scores.std()*100:.2f}%")
 
 # --------------------------------------------------
-# Train with probability calibration
+# Train
 # --------------------------------------------------
 print("\n🏋️  Training with CalibratedClassifierCV (isotonic regression)...")
 clf = CalibratedClassifierCV(base_clf, method="isotonic", cv=3)
@@ -316,9 +305,6 @@ for k in ["accuracy", "precision", "recall", "f1_score", "roc_auc", "brier_score
     print(f"  {k:<14}: {metrics[k]}")
 print(f"  {'cv_f1':<14}: {metrics['cv_f1_mean']}% ± {metrics['cv_f1_std']}%")
 
-# --------------------------------------------------
-# Stylistic feature importance  (TF-IDF mode only)
-# --------------------------------------------------
 if not USE_BERT:
     try:
         inner_clf   = clf.calibrated_classifiers_[0].estimator

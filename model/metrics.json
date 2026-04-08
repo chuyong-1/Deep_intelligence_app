@@ -1,22 +1,26 @@
 {
-  "accuracy": 97.62,
-  "precision": 96.81,
-  "recall": 98.5,
-  "f1_score": 97.65,
-  "roc_auc": 99.82,
+  "accuracy": 96.35,
+  "precision": 96.47,
+  "recall": 96.23,
+  "f1_score": 96.35,
+  "roc_auc": 99.33,
+  "brier_score": 0.0282,
+  "cv_f1_mean": 95.92,
+  "cv_f1_std": 0.19,
   "confusion_matrix": [
     [
-      387,
-      13
+      4763,
+      174
     ],
     [
-      6,
-      394
+      186,
+      4751
     ]
   ],
-  "feature_type": "bert",
-  "train_size": 3200,
-  "test_size": 800,
-  "model": "LogisticRegression",
-  "bert_model": "distilbert-base-uncased"
+  "feature_type": "bert+style",
+  "train_size": 39492,
+  "test_size": 9874,
+  "model": "LogisticRegression+CalibratedCV",
+  "bert_model": "distilbert-base-uncased",
+  "style_features": 16
 }

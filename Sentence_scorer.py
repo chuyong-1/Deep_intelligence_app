@@ -1,7 +1,7 @@
 """
-sentence_scorer.py
+Sentence_scorer.py
 
-Sentence-level suspiciousness scoring for the News Credibility Checker.
+Sentence-level suspiciousness scoring for the Verity News Credibility Dashboard.
 
 Each sentence is scored 0.0 (very credible) → 1.0 (very suspicious)
 using the same signal lists already defined in features.py.
