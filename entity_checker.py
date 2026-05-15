@@ -1,13 +1,16 @@
 """
-entity_checker.py  v2
+entity_checker.py  v2.1
 
-Improvements over v1:
-  - Concurrent Wikipedia lookups (ThreadPoolExecutor) — ~5-10x faster
-  - Retry logic with exponential back-off for transient HTTP errors
-  - Wikidata fallback for entities not found on Wikipedia REST API
-  - Entity confidence weighting: PERSON/ORG weighted higher than GPE
-  - Frequency-weighted scoring: entities mentioned more get more weight
-  - Preserves original case for API lookup but deduplicates by normalised key
+Fixes over v2
+─────────────
+  1. _wiki_lookup — preserve original casing for the Wikipedia API URL.
+     v2 passed `key` (lowercased) to `.title()` which converts acronyms
+     like "NATO" → "nato" → "Nato", causing a Wikipedia 404. The fix
+     passes the original entity name directly into the URL so "NATO" stays
+     "NATO" and the lookup succeeds. The LRU cache still uses the lowercased
+     key for deduplication.
+
+  2. All other logic, public API, and signatures are unchanged.
 """
 
 import re
@@ -26,13 +29,12 @@ WIKIDATA_API  = "https://www.wikidata.org/w/api.php"
 HEADERS       = {"User-Agent": "NewsCredibilityChecker/2.0 (educational project)"}
 TIMEOUT       = 6
 MAX_ENTITIES  = 12
-MAX_WORKERS   = 6      # concurrent Wikipedia requests
+MAX_WORKERS   = 6
 MAX_RETRIES   = 2
-RETRY_DELAY   = 0.4   # seconds between retries
+RETRY_DELAY   = 0.4
 
 ENTITY_TYPES  = {"PERSON", "ORG", "GPE", "NORP", "FAC", "LOC"}
 
-# Weight by entity type — fabricated people/orgs matter more than places
 ENTITY_WEIGHT = {
     "PERSON": 1.5,
     "ORG":    1.3,
@@ -58,11 +60,11 @@ class EntityResult:
     name: str
     entity_type: str
     status: str                  # verified | not_found | ambiguous | error
-    frequency: int = 1           # how many times it appeared in the article
-    confidence: float = 1.0      # entity-type weight
+    frequency: int = 1
+    confidence: float = 1.0
     summary: Optional[str] = None
     wiki_url: Optional[str] = None
-    wikidata_found: bool = False  # True if Wikidata rescued a not-found
+    wikidata_found: bool = False
     score_impact: float = 0.0
 
 
@@ -82,14 +84,19 @@ class EntityCheckReport:
 # Wikipedia REST API  (LRU cache, max 512 entries)
 # --------------------------------------------------
 @lru_cache(maxsize=512)
-def _wiki_lookup(key: str) -> tuple:
+def _wiki_lookup(key: str, original: str) -> tuple:
     """
-    key = lowercased entity name.
+    key      = lowercased entity name (used only for LRU cache deduplication).
+    original = entity name in its original casing, used for the API URL.
+
+    FIX (v2.1): v2 derived the URL name via `key.title()`, which corrupts
+    acronyms — "nato".title() == "Nato" → Wikipedia 404.  We now use
+    `original` directly so "NATO" stays "NATO".
+
     Returns (status, summary, url).
     Retries up to MAX_RETRIES on 5xx / connection errors.
     """
-    entity = key.title()
-    url    = WIKI_API + requests.utils.quote(entity)
+    url = WIKI_API + requests.utils.quote(original)
 
     for attempt in range(MAX_RETRIES + 1):
         try:
@@ -100,7 +107,7 @@ def _wiki_lookup(key: str) -> tuple:
                 if data.get("type") == "disambiguation":
                     return (
                         "ambiguous",
-                        f"Multiple Wikipedia pages match '{entity}'.",
+                        f"Multiple Wikipedia pages match '{original}'.",
                         data.get("content_urls", {}).get("desktop", {}).get("page"),
                     )
                 extract   = data.get("extract", "")
@@ -115,7 +122,6 @@ def _wiki_lookup(key: str) -> tuple:
             if resp.status_code == 404:
                 return ("not_found", None, None)
 
-            # 5xx — retry
             if resp.status_code >= 500 and attempt < MAX_RETRIES:
                 time.sleep(RETRY_DELAY * (attempt + 1))
                 continue
@@ -140,7 +146,6 @@ def _wiki_lookup(key: str) -> tuple:
 def _wikidata_exists(entity: str) -> bool:
     """
     Quick Wikidata search — returns True if at least one result exists.
-    Used as a fallback when Wikipedia REST 404s.
     """
     try:
         params = {
@@ -165,12 +170,12 @@ def query_entity(entity: str) -> dict:
     Returns dict with status, summary, url, wikidata_found.
     """
     key = entity.lower().strip()
-    status, summary, url = _wiki_lookup(key)
+    # Pass original name so the API URL preserves casing (fixes acronyms)
+    status, summary, url = _wiki_lookup(key, entity)
 
     wikidata_found = False
     if status == "not_found":
         if _wikidata_exists(entity):
-            # Wikidata knows it but Wikipedia REST doesn't have a clean summary page
             status         = "ambiguous"
             summary        = f"'{entity}' found on Wikidata but lacks a Wikipedia summary page."
             wikidata_found = True
@@ -193,8 +198,8 @@ def extract_entities(text: str, nlp) -> List[Tuple[str, str, int]]:
     """
     doc = nlp(text[:5000])
 
-    freq: dict[str, int]  = {}
-    canonical: dict       = {}   # key → (name, label)
+    freq: dict      = {}
+    canonical: dict = {}
 
     for ent in doc.ents:
         if ent.label_ not in ENTITY_TYPES:
@@ -207,7 +212,6 @@ def extract_entities(text: str, nlp) -> List[Tuple[str, str, int]]:
         if key not in canonical:
             canonical[key] = (name, ent.label_)
 
-    # Sort by frequency desc, take top MAX_ENTITIES
     sorted_keys = sorted(freq, key=lambda k: -freq[k])[:MAX_ENTITIES]
     return [(canonical[k][0], canonical[k][1], freq[k]) for k in sorted_keys]
 
@@ -260,7 +264,6 @@ def check_entities(text: str, nlp=None) -> EntityCheckReport:
 
     report.total_checked = len(raw_entities)
 
-    # --- concurrent Wikipedia lookups ---
     results_map: dict = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         future_to_name = {
@@ -276,7 +279,6 @@ def check_entities(text: str, nlp=None) -> EntityCheckReport:
                         "url": None, "wikidata_found": False}
             results_map[name] = (label, freq, wiki)
 
-    # Reconstruct in original frequency order
     for name, label, freq in raw_entities:
         label, freq, wiki = results_map[name]
         result = EntityResult(

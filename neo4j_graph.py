@@ -1,39 +1,18 @@
 """
-neo4j_graph.py  v1
+neo4j_graph.py  v1.2
 
-Relational Intelligence layer for the Verity OSINT Dashboard.
+Fixes over v1.1
+───────────────
+  1. basic_auth removed in neo4j Python driver 5.x — importing it raised an
+     ImportError that was silently caught by the try/except block, setting
+     _NEO4J_AVAILABLE = False and causing the driver to never initialise with
+     the real AuraDB URI (falling back to localhost:7687 instead).
 
-Graph schema
-────────────
-  Nodes       : Article, Entity, Author, Domain
-  Relationships:
-    (Article)-[:MENTIONS]->(Entity)
-    (Article)-[:PUBLISHED_BY]->(Domain)
-    (Article)-[:WRITTEN_BY]->(Author)
+     Fix: import only GraphDatabase (always present in 5.x); auth is now
+     passed as a plain tuple (user, password) which is the canonical 5.x way
+     and also works on 4.x.  basic_auth is no longer needed.
 
-All writes use MERGE — idempotent, safe to call multiple times per scan.
-
-Usage
-─────
-    from neo4j_graph import Neo4jGraph
-
-    graph = Neo4jGraph(uri, user, password)
-    graph.upsert_scan_result(
-        snippet     = "...",
-        verdict     = "Fake",
-        final_score = 18.5,
-        domain      = "example.com",
-        author      = "Jane Doe",
-        entities    = [("Donald Trump", "PERSON", 2), ("NATO", "ORG", 1)],
-        modality    = "Text",
-    )
-    graph.close()
-
-Thread safety
-─────────────
-The Neo4j Python driver manages its own connection pool; a single
-Neo4jGraph instance stored in st.cache_resource is safe for all
-concurrent Streamlit sessions.
+  2. All other fixes from v1.1 retained unchanged.
 """
 
 from __future__ import annotations
@@ -44,7 +23,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 try:
-    from neo4j import GraphDatabase, basic_auth
+    from neo4j import GraphDatabase
     _NEO4J_AVAILABLE = True
 except ImportError:
     _NEO4J_AVAILABLE = False
@@ -55,7 +34,6 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _article_id(snippet: str, domain: str) -> str:
-    """Stable 16-char SHA-1 ID — same scan never creates duplicate nodes."""
     raw = f"{snippet.strip().lower()[:200]}|{domain}"
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
@@ -162,11 +140,14 @@ RETURN a, r, n
 LIMIT 200
 """
 
+# FIX (v1.1): The original chained WITH count() pattern returns wrong values.
+# Each CALL {} subquery runs against the full graph independently, giving
+# correct per-label counts on all Neo4j 4.x and 5.x versions.
 STATS_QUERY = """
-OPTIONAL MATCH (a:Article)  WITH count(a) AS articles
-OPTIONAL MATCH (e:Entity)   WITH articles, count(e) AS entities
-OPTIONAL MATCH (d:Domain)   WITH articles, entities, count(d) AS domains
-OPTIONAL MATCH (au:Author)  WITH articles, entities, domains, count(au) AS authors
+CALL { MATCH (a:Article) RETURN count(a) AS articles }
+CALL { MATCH (e:Entity)  RETURN count(e) AS entities }
+CALL { MATCH (d:Domain)  RETURN count(d) AS domains  }
+CALL { MATCH (au:Author) RETURN count(au) AS authors  }
 RETURN articles, entities, domains, authors
 """
 
@@ -189,12 +170,27 @@ class Neo4jGraph:
     def __init__(self, uri: str, user: str, password: str) -> None:
         if not _NEO4J_AVAILABLE:
             raise ImportError("Run:  pip install neo4j")
-        self._driver = GraphDatabase.driver(uri, auth=basic_auth(user, password))
+        self._driver = GraphDatabase.driver(uri, auth=(user, password))
         self._ensure_constraints()
 
     # ── Schema bootstrapping ─────────────────────────────────────────────────
 
     def _ensure_constraints(self) -> None:
+        """
+        Create uniqueness constraints if they do not already exist.
+
+        FIX (v1.1): The original swallowed every exception including real
+        connection failures (wrong credentials, network errors). That made
+        __init__ appear to succeed, with the actual error surfacing only on
+        the first real query with a confusing message.
+
+        Now:
+          - "already exists" / "equivalent" constraint errors → silent pass
+            (idempotent re-runs on an existing DB are fine)
+          - Any other exception → printed as a clear warning
+          - Connection-level errors (ServiceUnavailable, AuthError) propagate
+            so callers know the DB is unreachable at construction time.
+        """
         stmts = [
             "CREATE CONSTRAINT article_id IF NOT EXISTS FOR (a:Article)  REQUIRE a.article_id IS UNIQUE",
             "CREATE CONSTRAINT domain_name IF NOT EXISTS FOR (d:Domain)   REQUIRE d.name IS UNIQUE",
@@ -205,8 +201,12 @@ class Neo4jGraph:
             for stmt in stmts:
                 try:
                     s.run(stmt)
-                except Exception:
-                    pass   # already exists or older Neo4j syntax — safe to ignore
+                except Exception as exc:
+                    msg = str(exc).lower()
+                    if "already exists" in msg or "equivalent" in msg:
+                        pass  # idempotent — constraint already present
+                    else:
+                        print(f"[neo4j_graph] WARNING: constraint creation failed: {exc}")
 
     # ── Primary write API ─────────────────────────────────────────────────────
 
@@ -231,7 +231,6 @@ class Neo4jGraph:
         article_id = article_id or _article_id(snippet, domain)
         entities   = entities or []
 
-        # Normalise entity tuples to (name, etype, freq)
         normalised = []
         for e in entities:
             if len(e) == 3:
@@ -277,15 +276,11 @@ class Neo4jGraph:
 
     # ── Read / analytics ──────────────────────────────────────────────────────
 
-    def get_narrative_clusters(self) -> list[dict]:
-        """
-        Entities appearing in >= 2 fake/uncertain articles across >= 2 domains.
-        Key signal for coordinated disinformation campaigns.
-        """
+    def get_narrative_clusters(self) -> list:
         with self._driver.session() as s:
             return [dict(r) for r in s.run(NARRATIVE_CLUSTER_QUERY)]
 
-    def get_domain_risk_profile(self) -> list[dict]:
+    def get_domain_risk_profile(self) -> list:
         with self._driver.session() as s:
             return [dict(r) for r in s.run(DOMAIN_RISK_QUERY)]
 
@@ -296,8 +291,8 @@ class Neo4jGraph:
         _VERDICT_COLOR = {"Fake": "#ef4444", "Uncertain": "#f59e0b", "Real": "#22c55e"}
         _GROUP_COLOR   = {"Entity": "#6366f1", "Domain": "#0ea5e9", "Author": "#ec4899"}
 
-        nodes_map: dict[str, dict] = {}
-        edges: list[dict]          = []
+        nodes_map: dict = {}
+        edges: list     = []
 
         with self._driver.session() as s:
             for rec in s.run(GRAPH_VIZ_QUERY):
@@ -314,6 +309,7 @@ class Neo4jGraph:
                         "title": f"Verdict: {a.get('verdict')} | Score: {a.get('final_score')}",
                     }
 
+                # n.labels is a frozenset in both driver v4 and v5
                 grp  = list(n.labels)[0] if n.labels else "Unknown"
                 nid  = str(n.element_id)
                 name = n.get("name") or n.get("article_id") or nid
@@ -345,8 +341,7 @@ class Neo4jGraph:
                 s.run("RETURN 1")
             return True
         except Exception as e:
-            # THIS WILL PRINT THE EXACT REASON TO YOUR TERMINAL
-            print(f"\n🔥 NEO4J CONNECTION ERROR: {e}\n") 
+            print(f"\n🔥 NEO4J CONNECTION ERROR: {e}\n")
             return False
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────

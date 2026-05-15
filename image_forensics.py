@@ -1,30 +1,35 @@
 """
-image_forensics.py  v4
+image_forensics.py  v4.1
 
-v4 changes
-──────────
-  • blend_ela_overlay(original, ela_heatmap, alpha) — NEW
-    Blends the ELA heatmap over the original image using cv2.addWeighted.
-    Alpha=0.0 → pure original; Alpha=1.0 → pure heatmap.
-    Returns a PIL Image suitable for st.image().
+Fixes over v4
+─────────────
+  1. SigLIP-2 pipeline type corrected (critical bug fix).
 
-  • consensus_meter(ai_result, bio_results) — NEW
-    Compares SigLIP-2 AI-generation score against biological consistency
-    anomaly count and returns a dict:
-        {
-          "label":       str,   # "Consensus", "Minor Discordance", "High-Complexity Edge Case"
-          "detail":      str,   # human-readable explanation
-          "ai_score":    float,
-          "bio_flags":   int,   # total suspicious zones across all faces
-          "conflict":    bool,
-        }
-    A "High-Complexity Edge Case" is raised when:
-      • ai_score >= 60 but bio_flags == 0
-      • ai_score <  40 but bio_flags >= 2
+     v4 called:
+         pipeline("image-classification", model="google/siglip2-base-patch16-224")
 
-All existing functions, thresholds, and signatures are UNCHANGED.
+     SigLIP-2 is a vision-language (CLIP-style) encoder — it has NO
+     image-classification head. Using "image-classification" on it either
+     raises an error or returns model-internal token IDs as labels (e.g.
+     "LABEL_0", "LABEL_1") which never match the "ai"/"real" strings in
+     detect_ai_image(). That triggered the last-resort fallback, which
+     assigned the top result as AI regardless of content — making every
+     image score ~67% AI-generated (observed bug in screenshots).
+
+     Fix: use "zero-shot-image-classification" with explicit candidate labels
+         ["AI-generated image", "real photograph"]
+
+     The same ONNX export / quantization path is kept; the pipeline type
+     is the only change. detect_ai_image() is updated to read the new
+     zero-shot output format: [{"label": ..., "score": ...}] where label
+     is one of the two candidate strings.
+
+  2. _build_onnx_pipeline and _ensure_onnx_model updated to use the correct
+     pipeline task string "zero-shot-image-classification" and pass
+     candidate_labels at inference time.
+
+  3. All other functions, thresholds, and signatures are UNCHANGED.
 """
-
 
 from __future__ import annotations
 
@@ -34,7 +39,6 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List
-
 
 from PIL import Image
 
@@ -46,6 +50,13 @@ _ONNX_DEEPFAKE_DIR = _ONNX_ROOT / "deepfake_detector"
 # ── Model identifiers ─────────────────────────────────────────────────────────
 _AI_MODEL_ID       = "google/siglip2-base-patch16-224"
 _DEEPFAKE_MODEL_ID = "prithivMLmods/Deep-Fake-Detector-Model"
+
+# ── SigLIP-2 zero-shot candidate labels ──────────────────────────────────────
+# These are the two text prompts passed to the vision-language model.
+# Order matters for score retrieval in detect_ai_image().
+_SIGLIP_AI_LABEL   = "AI-generated image"
+_SIGLIP_REAL_LABEL = "real photograph"
+_SIGLIP_CANDIDATES = [_SIGLIP_AI_LABEL, _SIGLIP_REAL_LABEL]
 
 # ── Inference constants ───────────────────────────────────────────────────────
 _DEEPFAKE_INPUT_SIZE = 224
@@ -81,9 +92,9 @@ class BioCheckResult:
     hair_suspicious:     bool = False
     symmetry_suspicious: bool = False
 
-    any_suspicious:   bool        = False
-    suspicious_zones: List[str]   = field(default_factory=list)
-    notes:            List[str]   = field(default_factory=list)
+    any_suspicious:   bool      = False
+    suspicious_zones: List[str] = field(default_factory=list)
+    notes:            List[str] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -127,12 +138,19 @@ def _ensure_onnx_model(model_id: str, onnx_dir: Path) -> Optional[Path]:
     return quantized_path
 
 
-def _build_onnx_pipeline(model_id: str, onnx_dir: Path):
+def _build_onnx_pipeline(model_id: str, onnx_dir: Path, task: str = "image-classification"):
+    """
+    Build an inference pipeline, preferring ONNX INT8 when available.
+
+    FIX (v4.1): The `task` parameter is now threaded through so callers
+    can specify "zero-shot-image-classification" for SigLIP-2 instead of
+    the incorrect "image-classification" used in v4.
+    """
     quantized_path = _ensure_onnx_model(model_id, onnx_dir)
 
     if quantized_path is None:
         from transformers import pipeline as hf_pipeline
-        return hf_pipeline("image-classification", model=model_id, device=-1)
+        return hf_pipeline(task, model=model_id, device=-1)
 
     try:
         from optimum.onnxruntime import ORTModelForImageClassification
@@ -150,52 +168,63 @@ def _build_onnx_pipeline(model_id: str, onnx_dir: Path):
             file_name="model_quantized.onnx",
         )
         return hf_pipeline(
-            "image-classification",
+            task,
             model=ort_model,
             feature_extractor=processor,
         )
     except Exception:
         from transformers import pipeline as hf_pipeline
-        return hf_pipeline("image-classification", model=model_id, device=-1)
+        return hf_pipeline(task, model=model_id, device=-1)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1.  AI Image Detector  (SigLIP-2, ONNX INT8)
+# 1.  AI Image Detector  (SigLIP-2, zero-shot)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_image_model():
-    return _build_onnx_pipeline(_AI_MODEL_ID, _ONNX_AI_DIR)
+    """
+    FIX (v4.1): Use "zero-shot-image-classification" — the correct pipeline
+    task for SigLIP-2, which is a vision-language encoder without a
+    classification head.
+    """
+    return _build_onnx_pipeline(
+        _AI_MODEL_ID,
+        _ONNX_AI_DIR,
+        task="zero-shot-image-classification",
+    )
 
 
 def detect_ai_image(image: Image.Image, model) -> dict:
     """
-    CRITICAL THRESHOLD: >= 85 % -> "AI-Generated"  (must never be lowered)
+    Run SigLIP-2 zero-shot classification with two candidate labels:
+        - "AI-generated image"
+        - "real photograph"
+
+    FIX (v4.1): v4 called model(image) without candidate_labels, which is
+    required for zero-shot pipelines. Without them transformers raises a
+    ValueError or returns internal token IDs. We now pass _SIGLIP_CANDIDATES
+    explicitly.
+
+    The score extraction uses exact string matching against the two known
+    candidate labels, completely replacing the fragile label-sniffing
+    fallback that caused every image to read ~67% AI-generated.
+
+    CRITICAL THRESHOLD: >= 85% -> "AI-Generated"  (must never be lowered)
     """
     if image.mode != "RGB":
         image = image.convert("RGB")
 
-    results = model(image)
-    scores: dict[str, float] = {
-        item["label"].lower(): item["score"] for item in results
-    }
+    # Pass candidate_labels — mandatory for zero-shot-image-classification
+    results = model(image, candidate_labels=_SIGLIP_CANDIDATES)
 
-    raw_ai = scores.get("ai",
-             scores.get("artificial",
-             scores.get("fake",
-             scores.get("generated", 0.0))))
-    raw_real = scores.get("real",
-               scores.get("authentic",
-               scores.get("genuine",
-               scores.get("original", 0.0))))
+    # results: [{"label": "AI-generated image", "score": 0.72}, ...]
+    scores: dict = {item["label"]: item["score"] for item in results}
 
-    if raw_ai == 0.0 and raw_real == 0.0 and results:
-        top_label = results[0]["label"].lower()
-        top_score = results[0]["score"]
-        if any(r in top_label for r in _REAL_LABELS):
-            raw_real, raw_ai = top_score, 1.0 - top_score
-        else:
-            raw_ai, raw_real = top_score, 1.0 - top_score
+    raw_ai   = scores.get(_SIGLIP_AI_LABEL,   0.0)
+    raw_real = scores.get(_SIGLIP_REAL_LABEL,  0.0)
 
+    # Normalise to 100% (zero-shot scores are already softmax-normalised
+    # across candidates, but guard against floating-point edge cases)
     total    = max(raw_ai + raw_real, 1e-9)
     ai_prob  = round(min(max((raw_ai  / total) * 100, 0.0), 100.0), 2)
     real_pct = round(min(max((raw_real / total) * 100, 0.0), 100.0), 2)
@@ -270,7 +299,7 @@ def extract_exif(image: Image.Image) -> dict:
             if tag_name == "Software":
                 software = str_value
 
-    editing_flags: list[str] = []
+    editing_flags: List[str] = []
     if software:
         sw_lower = software.lower()
         for kw in EDITING_SOFTWARE_KEYWORDS:
@@ -296,7 +325,7 @@ def extract_exif(image: Image.Image) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3.  Error Level Analysis  + Overlay  [v4: blend_ela_overlay added]
+# 3.  Error Level Analysis  + Overlay
 # ──────────────────────────────────────────────────────────────────────────────
 
 def generate_ela_heatmap(
@@ -326,38 +355,11 @@ def generate_ela_heatmap(
     return Image.fromarray(heatmap_rgb)
 
 
-# ─── NEW ───────────────────────────────────────────────────────────────────
 def blend_ela_overlay(
     original: Image.Image,
     ela_heatmap: Image.Image,
     alpha: float = 0.5,
 ) -> Image.Image:
-    """
-    Blend the ELA heatmap over the original image.
-
-    Uses cv2.addWeighted:
-        output = original * (1 - alpha) + heatmap * alpha
-
-    Args:
-        original:    PIL Image — the source photograph (RGB).
-        ela_heatmap: PIL Image — output of generate_ela_heatmap() (RGB).
-        alpha:       float 0.0–1.0
-                       0.0 → pure original
-                       1.0 → pure heatmap
-                       0.4 → analyst sweet-spot (default)
-
-    Returns:
-        PIL Image (RGB) — blended result, same dimensions as `original`.
-
-    Aspect-ratio safety
-    ───────────────────
-    PIL Image.size returns (width, height).  When the ELA was computed on a
-    downsampled copy its aspect ratio may differ from the original due to
-    integer rounding.  We resize with LANCZOS for downscaling and BICUBIC
-    for upscaling to preserve sharpness in both directions.  A mismatch
-    larger than 5% in either axis is logged as a warning (indicates the ELA
-    was computed on a different image) but the blend still proceeds.
-    """
     import cv2
     import numpy as np
 
@@ -372,7 +374,6 @@ def blend_ela_overlay(
     ela_w,  ela_h  = ela_heatmap.size
 
     if (ela_w, ela_h) != (orig_w, orig_h):
-        # Warn if aspect ratios diverge by more than 5% (different source image)
         ar_orig = orig_w / max(orig_h, 1)
         ar_ela  = ela_w  / max(ela_h,  1)
         if abs(ar_orig - ar_ela) / max(ar_orig, 1e-9) > 0.05:
@@ -384,9 +385,6 @@ def blend_ela_overlay(
                 stacklevel=2,
             )
 
-        # Choose resampling filter: LANCZOS for downscale, BICUBIC for upscale
-        # (LANCZOS is sharper for reduction; BICUBIC avoids LANCZOS ringing on
-        #  upscale which would introduce false high-error artefacts in the overlay)
         is_upscale = (orig_w * orig_h) > (ela_w * ela_h)
         resample   = Image.BICUBIC if is_upscale else Image.LANCZOS
         ela_heatmap = ela_heatmap.resize((orig_w, orig_h), resample)
@@ -394,7 +392,6 @@ def blend_ela_overlay(
     orig_np = np.array(original,    dtype=np.float32)
     heat_np = np.array(ela_heatmap, dtype=np.float32)
 
-    # cv2.addWeighted: dst = src1*alpha1 + src2*alpha2 + gamma
     blended = cv2.addWeighted(orig_np, 1.0 - alpha, heat_np, alpha, 0.0)
     blended = np.clip(blended, 0, 255).astype(np.uint8)
     return Image.fromarray(blended)
@@ -408,7 +405,7 @@ def extract_faces(
     image: Image.Image,
     min_face_size: int   = 80,
     padding:       float = 0.20,
-) -> list[Image.Image]:
+) -> List[Image.Image]:
     try:
         from facenet_pytorch import MTCNN
     except ImportError:
@@ -426,7 +423,7 @@ def extract_faces(
         return []
 
     w, h   = image.size
-    crops: list[Image.Image] = []
+    crops: List[Image.Image] = []
 
     for box in boxes:
         x1, y1, x2, y2 = box
@@ -445,20 +442,24 @@ def extract_faces(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_deepfake_model():
-    return _build_onnx_pipeline(_DEEPFAKE_MODEL_ID, _ONNX_DEEPFAKE_DIR)
+    return _build_onnx_pipeline(
+        _DEEPFAKE_MODEL_ID,
+        _ONNX_DEEPFAKE_DIR,
+        task="image-classification",
+    )
 
 
 def detect_deepfake(
-    face_images: list[Image.Image],
+    face_images: List[Image.Image],
     model,
-) -> list[dict]:
+) -> List[dict]:
     """
-    CRITICAL THRESHOLD: >= 80 % -> "Deepfake Detected"  (must never be lowered)
+    CRITICAL THRESHOLD: >= 80% -> "Deepfake Detected"  (must never be lowered)
     """
     if not face_images:
         return []
 
-    results: list[dict] = []
+    results: List[dict] = []
 
     for face in face_images:
         if face.mode != "RGB":
@@ -479,7 +480,7 @@ def detect_deepfake(
             })
             continue
 
-        scores: dict[str, float] = {
+        scores: dict = {
             item["label"].lower(): item["score"] for item in raw
         }
 
@@ -501,7 +502,6 @@ def detect_deepfake(
         margin     = abs(fake_prob - 50.0)
         confidence = "High" if margin >= 30 else ("Medium" if margin >= 15 else "Low")
 
-        # CRITICAL: do not lower
         label = "Deepfake Detected" if fake_prob >= 80 else "Likely Real"
 
         results.append({
@@ -586,8 +586,8 @@ def _lr_symmetry_ratio(rgb) -> float:
 
 
 def biological_consistency_check(
-    face_images: list[Image.Image],
-) -> list[BioCheckResult]:
+    face_images: List[Image.Image],
+) -> List[BioCheckResult]:
     if not face_images:
         return []
 
@@ -597,7 +597,7 @@ def biological_consistency_check(
     except ImportError:
         return [BioCheckResult() for _ in face_images]
 
-    results: list[BioCheckResult] = []
+    results: List[BioCheckResult] = []
 
     for face in face_images:
         if face.mode != "RGB":
@@ -618,8 +618,8 @@ def biological_consistency_check(
         hair_flag = hair_grad  < _BIO_HAIR_FEATHER_THRESH
         sym_flag  = sym_ratio  > _BIO_SYMMETRY_THRESH
 
-        suspicious_zones: list[str] = []
-        notes: list[str] = []
+        suspicious_zones: List[str] = []
+        notes: List[str] = []
 
         if skin_flag:
             if skin_std < _BIO_SKIN_SMOOTH_THRESH:
@@ -680,49 +680,16 @@ def biological_consistency_check(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5c.  Consensus Meter  [NEW in v4]
+# 5c.  Consensus Meter
 # ──────────────────────────────────────────────────────────────────────────────
 
 def consensus_meter(
     ai_result:   Optional[dict],
-    bio_results: Optional[list[BioCheckResult]],
+    bio_results: Optional[List[BioCheckResult]],
 ) -> dict:
-    """
-    Compare the SigLIP-2 AI-generation score against Biological Consistency
-    anomaly count to detect signal conflicts.
-
-    Returns a dict:
-        label         str   "Consensus" | "Minor Discordance" | "High-Complexity Edge Case"
-        detail        str   human-readable explanation
-        ai_score      float 0–100 (0.0 if ai_result is None)
-        bio_flags     int   total suspicious zones across all faces
-        conflict      bool  True when signals strongly disagree
-        color         str   CSS colour string for UI
-        icon          str   emoji icon
-
-    Edge-case conditions (ordered by severity):
-      HIGH COMPLEXITY (conflict=True):
-        • ai_score >= 60 AND bio_flags == 0
-          "The AI detector is confident but biological checks found no anomalies.
-           Possible causes: texture-only GAN artefacts, JPEG re-encoding, or
-           model overconfidence on a genuine photo."
-        • ai_score < 40 AND bio_flags >= 2
-          "Biological checks flagged multiple zones but AI generation score is
-           low. Possible causes: medical/cosmetic alteration, heavy editing, or
-           measurement noise on a low-resolution crop."
-
-      MINOR DISCORDANCE (conflict=False):
-        • ai_score in [40,60) AND bio_flags == 1
-          "Borderline AI score with one minor bio-flag — insufficient evidence
-           to determine with confidence."
-
-      CONSENSUS:
-        Both signals agree (high AI ↔ multiple bio-flags, or low AI ↔ no flags).
-    """
     ai_score  = float(ai_result.get("ai_probability", 0.0)) if ai_result else 0.0
     bio_flags = sum(len(r.suspicious_zones) for r in bio_results) if bio_results else 0
 
-    # ── Classify ──────────────────────────────────────────────────────────────
     if ai_score >= 60 and bio_flags == 0:
         label   = "High-Complexity Edge Case"
         detail  = (
@@ -762,7 +729,6 @@ def consensus_meter(
         icon     = "〰️"
 
     else:
-        # Signals broadly agree
         if ai_score >= 60 and bio_flags >= 1:
             detail = (
                 f"Both detectors agree: AI generation score {ai_score:.1f}% "
@@ -785,36 +751,36 @@ def consensus_meter(
         icon     = "✅"
 
     return {
-        "label":    label,
-        "detail":   detail,
-        "ai_score": ai_score,
+        "label":     label,
+        "detail":    detail,
+        "ai_score":  ai_score,
         "bio_flags": bio_flags,
-        "conflict": conflict,
-        "color":    color,
-        "icon":     icon,
+        "conflict":  conflict,
+        "color":     color,
+        "icon":      icon,
     }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6.  Forensic Reasoning Engine  (v3 — unchanged)
+# 6.  Forensic Reasoning Engine
 # ──────────────────────────────────────────────────────────────────────────────
 
 def generate_forensic_reasoning(
     ai_result:        Optional[dict],
-    deepfake_results: Optional[list[dict]],
+    deepfake_results: Optional[List[dict]],
     exif_data:        Optional[dict],
-    bio_results:      Optional[list[BioCheckResult]] = None,
-) -> list[str]:
-    bullets: list[str] = []
+    bio_results:      Optional[List[BioCheckResult]] = None,
+) -> List[str]:
+    bullets: List[str] = []
 
     if bio_results:
-        all_notes: list[str] = []
+        all_notes: List[str] = []
         for r in bio_results:
             all_notes.extend(r.notes)
 
         if all_notes:
-            seen_zones: set[str] = set()
-            unique_notes: list[str] = []
+            seen_zones: set = set()
+            unique_notes: List[str] = []
             for note in all_notes:
                 zone = note.split(":")[0].strip()
                 if zone not in seen_zones:
@@ -878,8 +844,7 @@ def generate_forensic_reasoning(
         siglip_note = ""
         if raw_ai is not None and raw_real is not None:
             siglip_note = (
-                f" (SigLIP-2 sigmoid: AI={raw_ai:.3f}, Real={raw_real:.3f} — "
-                "independent per-label scores, not softmax-constrained)"
+                f" (SigLIP-2 scores: AI={raw_ai:.3f}, Real={raw_real:.3f})"
             )
 
         if ai_pct >= 85:
@@ -893,8 +858,8 @@ def generate_forensic_reasoning(
             bullets.append(
                 f"AI generation: {ai_pct:.1f}% — uncertain zone{siglip_note}. "
                 "Characteristics suggest heavy post-processing or partial AI-assisted "
-                "editing (inpainting, background replacement). Cannot be classified as "
-                "fully AI-generated; localised texture inconsistencies are present."
+                "editing. Cannot be classified as fully AI-generated; localised "
+                "texture inconsistencies are present."
             )
         elif ai_pct >= 50:
             bullets.append(
@@ -977,7 +942,7 @@ def generate_forensic_reasoning(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 7.  Video Pipeline  (unchanged)
+# 7.  Video Pipeline
 # ──────────────────────────────────────────────────────────────────────────────
 
 def extract_video_keyframes(
@@ -985,7 +950,7 @@ def extract_video_keyframes(
     max_frames:   int   = _VIDEO_MAX_FRAMES,
     scene_thresh: float = _VIDEO_SCENE_THRESH,
     min_gap_sec:  float = _VIDEO_MIN_GAP_SEC,
-) -> list[Image.Image]:
+) -> List[Image.Image]:
     try:
         import cv2
         import numpy as np
@@ -998,7 +963,7 @@ def extract_video_keyframes(
 
     fps         = cap.get(cv2.CAP_PROP_FPS) or 25.0
     min_gap_fr  = int(fps * min_gap_sec)
-    keyframes:  list[Image.Image] = []
+    keyframes:  List[Image.Image] = []
     prev_frame  = None
     frame_idx   = 0
     last_kf_idx = -min_gap_fr
@@ -1051,8 +1016,8 @@ def analyse_video_deepfakes(
 
     result["keyframe_count"] = len(keyframes)
 
-    all_df:  list[dict]           = []
-    all_bio: list[BioCheckResult] = []
+    all_df:  List[dict]           = []
+    all_bio: List[BioCheckResult] = []
 
     for frame_img in keyframes:
         faces = extract_faces(frame_img)

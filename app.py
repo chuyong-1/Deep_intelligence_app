@@ -29,6 +29,7 @@ v9 changes (Relational Intelligence layer)
 """
 
 from __future__ import annotations
+from typing import List, Optional, Tuple
 
 import hashlib
 import json
@@ -514,12 +515,24 @@ for _k, _v in _SS_DEFAULTS.items():
 # Neo4j — lazy singleton via st.cache_resource
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Module-level variable: stores Neo4j failure reason without calling
+# st.warning() inside @cache_resource (which re-executes on every
+# interaction when cached value is None, flooding the UI with warnings).
+_neo4j_warning: str = ""
+
 @st.cache_resource(show_spinner=False)
 def _get_graph():
     """
     Load credentials from st.secrets[neo4j] and return a Neo4jGraph instance.
     Returns None gracefully when neo4j is not configured.
+
+    FIX (v9.1): st.warning() calls removed from inside this function.
+    @cache_resource re-runs the function body on every Streamlit interaction
+    when the cached return value is None, causing the warning to flash
+    repeatedly. The failure reason is stored in _neo4j_warning and displayed
+    once in the sidebar instead.
     """
+    global _neo4j_warning
     try:
         from neo4j_graph import Neo4jGraph
         uri  = st.secrets["neo4j"]["NEO4J_URI"]
@@ -527,15 +540,14 @@ def _get_graph():
         pwd  = st.secrets["neo4j"]["NEO4J_PASSWORD"]
         g = Neo4jGraph(uri, user, pwd)
         if g.ping():
+            _neo4j_warning = ""
             return g
-        st.warning("Neo4j ping failed — graph features disabled.", icon="🕸️")
+        _neo4j_warning = "Neo4j ping failed — graph features disabled."
     except KeyError:
-        pass   # secrets not configured — silently skip
+        _neo4j_warning = ""   # secrets not configured — silently skip
     except Exception as exc:
-        st.warning(f"Neo4j unavailable: {exc}", icon="🕸️")
+        _neo4j_warning = f"Neo4j unavailable: {exc}"
     return None
-
-
 def _graph_upsert(
     snippet: str,
     verdict: str,
@@ -575,7 +587,7 @@ def _graph_upsert(
 # Uncertainty Logger
 # ──────────────────────────────────────────────────────────────────────────────
 
-def flag_for_review(image, ai_score: float, deepfake_score: float) -> str | None:
+def flag_for_review(image, ai_score: float, deepfake_score: float) -> Optional[str]:
     if not (50.0 <= ai_score <= 84.0 or 45.0 <= deepfake_score <= 79.0):
         return None
     ts    = int(time.time())
@@ -619,7 +631,7 @@ def scrape_url(url):
     except Exception as e:
         st.error(f"Could not scrape URL: {e}"); return ""
 
-def render_reasoning_log(bullets: list[str], title: str = "Forensic Reasoning Log") -> None:
+def render_reasoning_log(bullets: List[str], title: str = "Forensic Reasoning Log") -> None:
     if not bullets:
         return
     items_html = "".join(
@@ -989,7 +1001,7 @@ def analyse_article(
 # Training log renderer
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _render_train_log_lines(lines: list[str]) -> None:
+def _render_train_log_lines(lines: List[str]) -> None:
     html_lines = []
     for line in lines:
         line = line.strip()
@@ -1062,7 +1074,7 @@ def _is_training_running() -> bool:
     return proc.poll() is None
 
 
-def _training_counts() -> tuple[int,int,int]:
+def _training_counts() -> Tuple[int,int,int]:
     # Count images + JSON articles in staging
     staged_n = len([
         p for p in _STAGING_DIR.rglob("*")
@@ -1104,6 +1116,10 @@ with st.sidebar:
         f'<span class="sb-stat-val" style="color:{neo4j_color}">{neo4j_label}</span></div>',
         unsafe_allow_html=True,
     )
+    # FIX (v9.1): display Neo4j failure reason here (once) instead of inside
+    # _get_graph() where @cache_resource causes it to repeat on every rerun.
+    if not neo4j_online and _neo4j_warning:
+        st.warning(_neo4j_warning, icon="🕸️")
 
     if neo4j_online:
         g_stats = graph.get_stats()
@@ -1815,7 +1831,7 @@ with tab_review:
             unsafe_allow_html=True,
         )
 
-        def _safe_move_to_label(src: Path, dest_dir: Path, label: str) -> tuple[bool, str]:
+        def _safe_move_to_label(src: Path, dest_dir: Path, label: str) -> Tuple[bool, str]:
             """
             Atomically move src → dest_dir/src.name.
             Returns (success, message).

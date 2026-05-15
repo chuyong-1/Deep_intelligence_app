@@ -46,6 +46,7 @@ If fewer images are found, training is skipped and a warning is logged.
 """
 
 from __future__ import annotations
+from typing import List, Optional, Tuple
 
 import json
 import os
@@ -75,7 +76,6 @@ RANDOM_STATE     = 42
 for _d in (MODEL_SAVE_DIR, ONNX_OUT_DIR, REAL_DIR, FAKE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Logging helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -94,7 +94,7 @@ def _log(event: str, _max_retries: int = 3, _retry_delay: float = 0.15, **kwargs
     line   = json.dumps(record)
     print(line, flush=True)  # always succeeds — stdout is a pipe
 
-    last_exc: Exception | None = None
+    last_exc: Optional[Exception] = None
     for attempt in range(_max_retries):
         try:
             with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -116,18 +116,16 @@ def _log(event: str, _max_retries: int = 3, _retry_delay: float = 0.15, **kwargs
         flush=True,
     )
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Dataset helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
-
-def _collect_paths() -> tuple[list[Path], list[int]]:
+def _collect_paths() -> Tuple[List[Path], List[int]]:
     """Return (file_paths, labels) where label 0=real, 1=fake."""
-    paths:  list[Path] = []
-    labels: list[int]  = []
+    paths:  List[Path] = []
+    labels: List[int]  = []
 
     for p in sorted(REAL_DIR.iterdir()):
         if p.suffix.lower() in _IMG_EXTS:
@@ -138,7 +136,6 @@ def _collect_paths() -> tuple[list[Path], list[int]]:
             paths.append(p); labels.append(1)
 
     return paths, labels
-
 
 def _build_dataset(paths, labels, processor, augment: bool = False):
     """
@@ -171,7 +168,6 @@ def _build_dataset(paths, labels, processor, augment: bool = False):
 
     return items
 
-
 class _SimpleDataset:
     def __init__(self, items):
         self.items = items
@@ -182,13 +178,11 @@ class _SimpleDataset:
     def __getitem__(self, idx):
         return self.items[idx]
 
-
 def _collate(batch):
     import torch
     pixels = torch.stack([b[0] for b in batch])
     labels = torch.stack([b[1] for b in batch])
     return pixels, labels
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Transfer-learning: freeze strategy
@@ -235,7 +229,6 @@ def _apply_freeze_strategy(model):
     _log("params", trainable=trainable, total=total,
          pct=round(trainable / max(total, 1) * 100, 2))
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # ONNX quantization
 # ──────────────────────────────────────────────────────────────────────────────
@@ -247,7 +240,6 @@ def _quantize_to_onnx(model_dir: Path, onnx_dir: Path) -> Optional[Path]:
     Falls back gracefully if optimum / onnxruntime is not installed.
     Returns the path to the quantized model, or None on failure.
     """
-    from typing import Optional  # local import to avoid shadowing
 
     try:
         from optimum.onnxruntime import ORTModelForImageClassification
@@ -290,7 +282,6 @@ def _quantize_to_onnx(model_dir: Path, onnx_dir: Path) -> Optional[Path]:
     except Exception as exc:
         _log("onnx_error", reason=str(exc))
         return None
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Main training loop
@@ -491,7 +482,6 @@ def main():
         f"Model saved to {MODEL_SAVE_DIR}. "
         f"ONNX INT8 at {ONNX_OUT_DIR / 'model_quantized.onnx'}."
     ))
-
 
 if __name__ == "__main__":
     # Clear previous log on a fresh run
