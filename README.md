@@ -1,3 +1,7 @@
+<p align="center">
+  <img width="100%" src="https://capsule-render.vercel.app/api?type=waving&color=0:000000,40:5C0000,100:FF1E1E&height=180&section=header&text=Verity&fontSize=50&fontColor=FFFFFF&fontAlignY=36&animation=fadeIn&desc=Multimodal%20disinformation%20intelligence&descSize=16&descAlignY=58&descColor=FFD6D6" alt="Verity" />
+</p>
+
 # 🛰️ Verity Intelligence Command
 **AI-Powered OSINT & Disinformation Intelligence Platform**
 akansha is here
